@@ -209,3 +209,4 @@ debug_amazon_*
 products.json
 amazon_data/
 amazon_products.json
+products.db

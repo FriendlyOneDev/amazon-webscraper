@@ -4,7 +4,11 @@ import random
 import time
 import json
 import os
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import asyncio
+from playwright.async_api import (
+    async_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -30,31 +34,83 @@ class AmazonScraper:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
-    def get_page(self, url, attempt=1, max_attempts=3):
-        """Fetch a fully-rendered Amazon page using Playwright with price wait"""
+    async def get_page_async(self, url, attempt=1, max_attempts=3):
+        """Fetch Amazon page with guaranteed price loading"""
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                print(f"Fetching with Playwright: {url}")
-                page.goto(url, timeout=60000)
+            async with async_playwright() as p:
+                # Configure browser to look more human-like
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        f"--user-agent={random.choice(self.user_agents)}",
+                    ],
+                )
 
-                # Wait for product blocks to load
-                page.wait_for_selector("div.s-main-slot", timeout=10000)
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 800}, locale="en-US"
+                )
 
-                # Wait specifically for price elements — give it more time
+                page = await context.new_page()
+
+                # Block unnecessary resources
+                await page.route(
+                    "**/*.{png,jpg,jpeg,webp,gif,svg}", lambda route: route.abort()
+                )
+                await page.route("**/*.css", lambda route: route.abort())
+
+                print(f"Fetching with Playwright (attempt {attempt}): {url}")
+
                 try:
-                    page.wait_for_selector("span.a-price", timeout=5000)
-                except PlaywrightTimeoutError:
-                    print("⚠️ Prices did not load in time — continuing anyway")
+                    # Load page with networkidle state
+                    await page.goto(url, timeout=30000, wait_until="networkidle")
 
-                html = page.content()
-                browser.close()
-                return type(
-                    "Response", (), {"text": html, "status_code": 200}
-                )()  # Fake response object for compatibility
+                    # SPECIALIZED PRICE LOADING SEQUENCE
+                    price_loaded = False
+                    retries = 0
+                    max_price_retries = 3
+
+                    while not price_loaded and retries < max_price_retries:
+                        # Scroll to trigger price loading
+                        await page.evaluate("window.scrollBy(0, 500)")
+                        await asyncio.sleep(1)
+
+                        # Check for prices
+                        price_elements = await page.query_selector_all("span.a-price")
+                        if price_elements:
+                            print(f"✅ Found {len(price_elements)} price elements")
+                            price_loaded = True
+                        else:
+                            print("⚠️ No prices found, retrying...")
+                            await asyncio.sleep(2)
+                            retries += 1
+
+                    if not price_loaded:
+                        print("❌ Failed to load prices after retries")
+                        await browser.close()
+
+                        if attempt < max_attempts:
+                            await asyncio.sleep(random.uniform(3, 7))
+                            return await self.get_page_async(
+                                url, attempt + 1, max_attempts
+                            )
+                        return None
+
+                    # Get final content
+                    html = await page.content()
+                    await browser.close()
+                    return type("Response", (), {"text": html, "status_code": 200})()
+
+                except Exception as e:
+                    print(f"Page error: {e}")
+                    await browser.close()
+                    if attempt < max_attempts:
+                        await asyncio.sleep(random.uniform(3, 7))
+                        return await self.get_page_async(url, attempt + 1, max_attempts)
+                    return None
+
         except Exception as e:
-            print(f"Playwright error: {e}")
+            print(f"Browser error: {e}")
             return None
 
     def extract_product_blocks(self, soup):
@@ -90,7 +146,7 @@ class AmazonScraper:
 
         return unique_blocks
 
-    def get_search_results(self, query, pages=1, save_html=False):
+    async def get_search_results_async(self, query, pages=1, save_html=False):
         """Scrape multiple pages and return product block elements"""
         print(f"Starting search for: '{query}' across {pages} page(s)")
 
@@ -107,7 +163,7 @@ class AmazonScraper:
             if random.random() < 0.3:  # 30% chance to add ref parameter
                 url += f"&ref=sr_pg_{page}"
 
-            response = self.get_page(url)
+            response = await self.get_page_async(url)
             if not response:
                 print(f"Failed to fetch page {page}")
                 continue
@@ -152,7 +208,7 @@ class AmazonScraper:
             if page < pages:
                 delay = random.uniform(3, 8)
                 print(f"Waiting {delay:.2f} seconds before next page...")
-                time.sleep(delay)
+                await asyncio.sleep(delay)  # Use asyncio.sleep
 
         print(f"\nTotal product blocks collected: {len(all_blocks)}")
         return all_blocks
@@ -226,16 +282,16 @@ class AmazonScraper:
                     "span", string=re.compile(r"List:\s*\$")
                 )
                 if list_price:
-                    original_price_str = list_price.find_next(
-                        "span", class_="a-offscreen"
-                    ).get_text(strip=True)
-                    prices["original"] = float(
-                        original_price_str.replace("$", "").replace(",", "")
-                    )
+                    next_span = list_price.find_next("span", class_="a-offscreen")
+                    if next_span:
+                        original_price_str = next_span.get_text(strip=True)
+                        prices["original"] = float(
+                            original_price_str.replace("$", "").replace(",", "")
+                        )
 
         except Exception as e:
             print(f"Price extraction error: {str(e)}")
-        print(prices)
+
         return prices
 
     def extract_rating(self, product_block):
@@ -366,12 +422,14 @@ class AmazonScraper:
         # Filter out None values
         return {k: v for k, v in product_info.items() if v is not None}
 
-    def scrape_search(self, query, pages=1, save_html=False, save_blocks=False):
-        """Main method to scrape Amazon search results"""
+    async def scrape_search_async(
+        self, query, pages=1, save_html=False, save_blocks=False
+    ):
+        """Main async method to scrape Amazon search results"""
         print(f"Starting Amazon scrape for query: '{query}'")
 
         # Get product blocks from search pages
-        product_blocks = self.get_search_results(query, pages, save_html)
+        product_blocks = await self.get_search_results_async(query, pages, save_html)
 
         if not product_blocks:
             print("No product blocks found!")
@@ -406,27 +464,35 @@ class AmazonScraper:
             except Exception as e:
                 print(f"✗ Block {i}: Error during extraction - {e}")
 
-        # Save results
-        if products:
-            results_filename = os.path.join(
-                self.output_dir,
-                f"products_{query.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-            )
-            with open(results_filename, "w", encoding="utf-8") as f:
-                json.dump(products, f, indent=4, ensure_ascii=False)
-            print(f"\n✅ Saved {len(products)} products to: {results_filename}")
+        # Save results if main
+        if __name__ == "__main__":
+            if products:
+                results_filename = os.path.join(
+                    self.output_dir,
+                    f"products_{query.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                )
+                with open(results_filename, "w", encoding="utf-8") as f:
+                    json.dump(products, f, indent=4, ensure_ascii=False)
+                print(f"\n✅ Saved {len(products)} products to: {results_filename}")
 
         return products
 
+    # Convenience method to run async scraping
+    def scrape_search(self, query, pages=1, save_html=False, save_blocks=False):
+        """Convenience method to run async scraping"""
+        return asyncio.run(
+            self.scrape_search_async(query, pages, save_html, save_blocks)
+        )
+
 
 # Example usage
-if __name__ == "__main__":
+async def main():
     scraper = AmazonScraper()
 
     query = "laptop"
-    pages = 5
+    pages = 5  # Start with fewer pages for testing
 
-    products = scraper.scrape_search(
+    products = await scraper.scrape_search_async(
         query=query,
         pages=pages,
         save_html=True,  # Save raw HTML for debugging
@@ -443,3 +509,26 @@ if __name__ == "__main__":
         print(f"\n--- Product {i} ---")
         for key, value in product.items():
             print(f"{key}: {value}")
+
+
+# Run the async version
+if __name__ == "__main__":
+    # For environments that already have an event loop (like Jupyter)
+    try:
+        # Try to get the current event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is already running, create a task
+            import nest_asyncio
+
+            nest_asyncio.apply()
+            asyncio.run(main())
+        else:
+            asyncio.run(main())
+    except RuntimeError:
+        # No event loop, safe to use asyncio.run
+        asyncio.run(main())
+    except ImportError:
+        # nest_asyncio not available, try alternative approach
+        print("For Jupyter notebooks, install nest_asyncio: pip install nest_asyncio")
+        asyncio.run(main())
