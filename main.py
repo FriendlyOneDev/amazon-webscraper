@@ -21,10 +21,13 @@ templates = Jinja2Templates(directory="static")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    engine = create_db_engine("amazon.db")
+    db_path = getattr(
+        app.state, "db_path", "amazon.db"
+    )  # Fallback to "amazon.db" if not set
+    engine = create_db_engine(db_path)
     app.state.engine = engine
     yield
-    # Shutdown (optional cleanup logic here)
+    # Shutdown
     engine.dispose()
 
 
@@ -182,8 +185,7 @@ def parse_arguments():
 
 if __name__ == "__main__":
     args = parse_arguments()
-    engine = create_db_engine(args.db)
-    app.state.engine = engine
+    app.state.db_path = args.db
 
     if args.mode == "scrape":
         print(f"Scraping '{args.query}' ({args.pages} pages)...")
@@ -195,7 +197,7 @@ if __name__ == "__main__":
             save_blocks=args.debug,
         )
         if products:
-            db_manager = DatabaseManager(engine)
+            db_manager = DatabaseManager(create_db_engine(args.db))
             saved = db_manager.save_products(products)
             print(f"Processed {saved}/{len(products)} products.")
         else:

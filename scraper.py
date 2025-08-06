@@ -14,10 +14,10 @@ from datetime import datetime
 class AmazonScraper:
     def __init__(self, output_dir=None):
         self.user_agents = [
-            "Mozilla/5.0 (iPad; CPU OS 8_4_1 like Mac OS X) AppleWebKit/600.1.4 (KHTML, like Gecko) Version/8.0 Mobile/12H321 Safari/600.1.4",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; Touch; MASMJS; rv:11.0) like Gecko",
+            "Mozilla/5.0 (X11; CrOS x86_64 6946.63.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.130 Safari/537.36",
+            "Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; WOW64; Trident/6.0; SLCC2; .NET CLR 2.0.50727; .NET4.0C; .NET4.0E)",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:40.0) Gecko/20100101 Firefox/40.0",
         ]
         self.headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -74,7 +74,7 @@ class AmazonScraper:
                     # Wait specifically for dynamic price elements to load
                     price_loaded = False
                     scroll_attempts = 0
-                    max_scroll_attempts = 7  # Increased from 5
+                    max_scroll_attempts = 7
 
                     # More specific price selectors
                     price_selectors = [
@@ -92,7 +92,7 @@ class AmazonScraper:
                         await page.evaluate(
                             "window.scrollBy(0, window.innerHeight * 0.7)"
                         )
-                        await asyncio.sleep(2.5)  # Increased wait time
+                        await asyncio.sleep(2.5)
 
                         # Check for fully loaded price elements (with both symbol and value)
                         for selector in price_selectors:
@@ -120,13 +120,13 @@ class AmazonScraper:
                             "⏳ Prices not loaded yet - trying alternative approach..."
                         )
                         await page.wait_for_selector(
-                            "span.a-price", state="attached", timeout=10000
+                            "span.a-price", state="attached", timeout=15000
                         )
 
                         # Wait for specific price format to appear
                         try:
                             await page.wait_for_selector(
-                                "span.a-price span.a-offscreen", timeout=10000
+                                "span.a-price span.a-offscreen", timeout=15000
                             )
                             price_loaded = True
                         except:
