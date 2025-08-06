@@ -7,7 +7,7 @@ This project provides a command-line tool and web server for scraping Amazon pro
 ## Features
 
 - Scrape Amazon search results for a specified query and number of pages.
-- Store product details (price, rating, reviews, seller, etc.) in a SQLite database.
+- Store product details in a SQLite database.
 - Serve a web interface to:
   - Browse products with optional filtering by rating, price, and reviews.
   - View analytics such as average price, top discounts, and best value products.
