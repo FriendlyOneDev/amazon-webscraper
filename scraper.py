@@ -5,17 +5,14 @@ import time
 import json
 import os
 import asyncio
-from playwright.async_api import (
-    async_playwright,
-    TimeoutError as PlaywrightTimeoutError,
-)
+from playwright.async_api import async_playwright
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from datetime import datetime
 
 
 class AmazonScraper:
-    def __init__(self, output_dir="amazon_data"):
+    def __init__(self, output_dir=None):
         self.user_agents = [
             "Mozilla/5.0 (iPad; CPU OS 8_4_1 like Mac OS X) AppleWebKit/600.1.4 (KHTML, like Gecko) Version/8.0 Mobile/12H321 Safari/600.1.4",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
@@ -30,87 +27,158 @@ class AmazonScraper:
         self.session = requests.Session()
         self.output_dir = output_dir
 
-        # Create output directory if it doesn't exist
-        if not os.path.exists(self.output_dir):
+        # Create output directory only if output_dir is specified
+        if self.output_dir is not None and not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
     async def get_page_async(self, url, attempt=1, max_attempts=3):
-        """Fetch Amazon page with guaranteed price loading"""
         try:
             async with async_playwright() as p:
-                # Configure browser to look more human-like
                 browser = await p.chromium.launch(
                     headless=True,
                     args=[
                         "--disable-blink-features=AutomationControlled",
-                        f"--user-agent={random.choice(self.user_agents)}",
+                        "--user-agent=" + random.choice(self.user_agents),
                     ],
                 )
 
                 context = await browser.new_context(
-                    viewport={"width": 1280, "height": 800}, locale="en-US"
+                    viewport={"width": 1366, "height": 768},
+                    locale="en-US",
+                    timezone_id="America/New_York",
                 )
 
                 page = await context.new_page()
 
-                # Block unnecessary resources
+                # Block unnecessary resources but allow price-related requests
                 await page.route(
                     "**/*.{png,jpg,jpeg,webp,gif,svg}", lambda route: route.abort()
                 )
                 await page.route("**/*.css", lambda route: route.abort())
+                await page.route(
+                    "**/ajax/dynamiclist*", lambda route: route.continue_()
+                )  # Allow price API calls
 
                 print(f"Fetching with Playwright (attempt {attempt}): {url}")
 
                 try:
-                    # Load page with networkidle state
-                    await page.goto(url, timeout=30000, wait_until="networkidle")
+                    # Initial page load
+                    await page.goto(url, timeout=30000, wait_until="domcontentloaded")
 
-                    # SPECIALIZED PRICE LOADING SEQUENCE
+                    # Check for captcha
+                    if await page.query_selector("input#captchacharacters"):
+                        print("❌ CAPTCHA detected! Cannot proceed.")
+                        await browser.close()
+                        return None
+
+                    # Wait specifically for dynamic price elements to load
                     price_loaded = False
-                    retries = 0
-                    max_price_retries = 3
+                    scroll_attempts = 0
+                    max_scroll_attempts = 7  # Increased from 5
 
-                    while not price_loaded and retries < max_price_retries:
-                        # Scroll to trigger price loading
-                        await page.evaluate("window.scrollBy(0, 500)")
-                        await asyncio.sleep(1)
+                    # More specific price selectors
+                    price_selectors = [
+                        'span.a-price[data-a-color="base"]',  # Main price
+                        'span.a-price[data-a-color="price"]',  # Alternative price
+                        'span.a-text-price[data-a-strike="true"]',  # Original price
+                    ]
 
-                        # Check for prices
-                        price_elements = await page.query_selector_all("span.a-price")
-                        if price_elements:
-                            print(f"✅ Found {len(price_elements)} price elements")
-                            price_loaded = True
-                        else:
-                            print("⚠️ No prices found, retrying...")
-                            await asyncio.sleep(2)
-                            retries += 1
+                    while not price_loaded and scroll_attempts < max_scroll_attempts:
+                        print(
+                            f"↻ Scroll attempt {scroll_attempts + 1}/{max_scroll_attempts}"
+                        )
+
+                        # Scroll in increments
+                        await page.evaluate(
+                            "window.scrollBy(0, window.innerHeight * 0.7)"
+                        )
+                        await asyncio.sleep(2.5)  # Increased wait time
+
+                        # Check for fully loaded price elements (with both symbol and value)
+                        for selector in price_selectors:
+                            price_elements = await page.query_selector_all(selector)
+                            if price_elements:
+                                # Verify the elements actually contain price data
+                                for element in price_elements:
+                                    text = await element.inner_text()
+                                    if "$" in text and any(
+                                        char.isdigit() for char in text
+                                    ):
+                                        price_loaded = True
+                                        print(
+                                            f"✓ Found valid price element: {text.strip()}"
+                                        )
+                                        break
+                                if price_loaded:
+                                    break
+
+                        scroll_attempts += 1
 
                     if not price_loaded:
-                        print("❌ Failed to load prices after retries")
-                        await browser.close()
+                        # Final attempt with different strategy
+                        print(
+                            "⏳ Prices not loaded yet - trying alternative approach..."
+                        )
+                        await page.wait_for_selector(
+                            "span.a-price", state="attached", timeout=10000
+                        )
 
+                        # Wait for specific price format to appear
+                        try:
+                            await page.wait_for_selector(
+                                "span.a-price span.a-offscreen", timeout=10000
+                            )
+                            price_loaded = True
+                        except:
+                            pass
+
+                    if not price_loaded:
                         if attempt < max_attempts:
-                            await asyncio.sleep(random.uniform(3, 7))
+                            print(
+                                f"🔄 Reloading page (attempt {attempt + 1}/{max_attempts})"
+                            )
+                            await browser.close()
                             return await self.get_page_async(
                                 url, attempt + 1, max_attempts
                             )
-                        return None
+                        raise Exception("Prices failed to load after all attempts")
 
-                    # Get final content
+                    # Extra verification step - ensure prices aren't placeholders
+                    price_elements = await page.query_selector_all(
+                        "span.a-price span.a-offscreen"
+                    )
+                    for element in price_elements:
+                        price_text = await element.inner_text()
+                        if price_text and "$" in price_text:
+                            price_value = float(
+                                price_text.replace("$", "").replace(",", "")
+                            )
+                            if (
+                                price_value < 10
+                            ):  # Assuming no real products are under $10
+                                print(f"⚠️ Suspicious low price detected: {price_text}")
+                                price_loaded = False
+
+                    if not price_loaded:
+                        raise Exception("Placeholder prices detected")
+
                     html = await page.content()
                     await browser.close()
+                    print("✅ Successfully loaded page with verified prices")
                     return type("Response", (), {"text": html, "status_code": 200})()
 
                 except Exception as e:
-                    print(f"Page error: {e}")
+                    print(f"Page error: {str(e)}")
                     await browser.close()
                     if attempt < max_attempts:
-                        await asyncio.sleep(random.uniform(3, 7))
+                        delay = min(2**attempt, 30)
+                        print(f"⏳ Waiting {delay:.1f} seconds before retry...")
+                        await asyncio.sleep(delay + random.uniform(1, 3))
                         return await self.get_page_async(url, attempt + 1, max_attempts)
                     return None
 
         except Exception as e:
-            print(f"Browser error: {e}")
+            print(f"Browser error: {str(e)}")
             return None
 
     def extract_product_blocks(self, soup):
@@ -168,8 +236,8 @@ class AmazonScraper:
                 print(f"Failed to fetch page {page}")
                 continue
 
-            # Save HTML if requested
-            if save_html:
+            # Save HTML if requested and output_dir is specified
+            if save_html and self.output_dir is not None:
                 html_filename = os.path.join(
                     self.output_dir, f"page_{page}_{query.replace(' ', '_')}.html"
                 )
@@ -192,13 +260,14 @@ class AmazonScraper:
 
             if not blocks:
                 print(f"No product blocks found on page {page}")
-                # Try to save the page for debugging
-                debug_filename = os.path.join(
-                    self.output_dir, f"debug_page_{page}.html"
-                )
-                with open(debug_filename, "w", encoding="utf-8") as f:
-                    f.write(response.text)
-                print(f"Saved debug HTML to: {debug_filename}")
+                # Try to save the page for debugging if output_dir is specified
+                if self.output_dir is not None:
+                    debug_filename = os.path.join(
+                        self.output_dir, f"debug_page_{page}.html"
+                    )
+                    with open(debug_filename, "w", encoding="utf-8") as f:
+                        f.write(response.text)
+                    print(f"Saved debug HTML to: {debug_filename}")
                 continue
 
             print(f"Found {len(blocks)} product blocks on page {page}")
@@ -247,47 +316,62 @@ class AmazonScraper:
         prices = {"current": None, "original": None}
 
         try:
-            # CURRENT PRICE - More reliable extraction
+            # CURRENT PRICE - Primary extraction methods
+            # Method 1: Standard price format (.a-price .a-offscreen)
             price_span = product_block.select_one(".a-price .a-offscreen")
             if price_span:
                 current_price_str = price_span.get_text(strip=True)
-                prices["current"] = float(
-                    current_price_str.replace("$", "").replace(",", "")
-                )
+                try:
+                    prices["current"] = float(
+                        current_price_str.replace("$", "").replace(",", "")
+                    )
+                except ValueError:
+                    pass
             else:
-                # Fallback to whole+fraction parts if a-offscreen not found
+                # Method 2: Whole+fraction parts if a-offscreen not found
                 price_whole = product_block.select_one(".a-price .a-price-whole")
                 price_fraction = product_block.select_one(".a-price .a-price-fraction")
                 if price_whole and price_fraction:
-                    # PROPERLY handle the decimal point
-                    whole_part = (
-                        price_whole.get_text(strip=True)
-                        .replace(",", "")
-                        .replace(".", "")
-                    )
-                    fraction_part = price_fraction.get_text(strip=True)
-                    current_price_str = f"{whole_part}.{fraction_part}"
-                    prices["current"] = float(current_price_str)
+                    try:
+                        whole_part = price_whole.get_text(strip=True).replace(",", "")
+                        # Handle cases where price-whole might already include a decimal
+                        if "." in whole_part:
+                            whole_part = whole_part.split(".")[0]
+                        fraction_part = price_fraction.get_text(strip=True)
+                        current_price_str = f"{whole_part}.{fraction_part}"
+                        prices["current"] = float(current_price_str)
+                    except (ValueError, AttributeError):
+                        pass
 
-            # ORIGINAL PRICE
+            # ORIGINAL PRICE (only if different from current)
+            # Method 1: Standard strikethrough price
             original_price = product_block.select_one(".a-text-price .a-offscreen")
             if original_price:
                 original_price_str = original_price.get_text(strip=True)
-                prices["original"] = float(
-                    original_price_str.replace("$", "").replace(",", "")
-                )
-            else:
-                # Alternative original price location
-                list_price = product_block.find(
-                    "span", string=re.compile(r"List:\s*\$")
-                )
-                if list_price:
-                    next_span = list_price.find_next("span", class_="a-offscreen")
-                    if next_span:
-                        original_price_str = next_span.get_text(strip=True)
-                        prices["original"] = float(
-                            original_price_str.replace("$", "").replace(",", "")
+                try:
+                    original_price_float = float(
+                        original_price_str.replace("$", "").replace(",", "")
+                    )
+                    if (
+                        prices["current"] is None
+                        or original_price_float != prices["current"]
+                    ):
+                        prices["original"] = original_price_float
+                except ValueError:
+                    pass
+
+            # Method 2: Check for "More Buying Choices" price as fallback
+            if prices["current"] is None:
+                more_choices_price = product_block.select_one(".a-color-base")
+                if more_choices_price and "$" in more_choices_price.get_text():
+                    try:
+                        prices["current"] = float(
+                            more_choices_price.get_text(strip=True)
+                            .replace("$", "")
+                            .replace(",", "")
                         )
+                    except ValueError:
+                        pass
 
         except Exception as e:
             print(f"Price extraction error: {str(e)}")
@@ -435,8 +519,8 @@ class AmazonScraper:
             print("No product blocks found!")
             return []
 
-        # Save raw blocks if requested
-        if save_blocks:
+        # Save raw blocks if requested and output_dir is specified
+        if save_blocks and self.output_dir is not None:
             blocks_filename = os.path.join(
                 self.output_dir, f"blocks_{query.replace(' ', '_')}.html"
             )
@@ -464,8 +548,8 @@ class AmazonScraper:
             except Exception as e:
                 print(f"✗ Block {i}: Error during extraction - {e}")
 
-        # Save results if main
-        if __name__ == "__main__":
+        # Save results if main and output_dir is specified
+        if __name__ == "__main__" and self.output_dir is not None:
             if products:
                 results_filename = os.path.join(
                     self.output_dir,
@@ -487,7 +571,7 @@ class AmazonScraper:
 
 # Example usage
 async def main():
-    scraper = AmazonScraper()
+    scraper = AmazonScraper(output_dir=None)  # Pass None to disable output directory
 
     query = "laptop"
     pages = 5  # Start with fewer pages for testing
@@ -495,8 +579,8 @@ async def main():
     products = await scraper.scrape_search_async(
         query=query,
         pages=pages,
-        save_html=True,  # Save raw HTML for debugging
-        save_blocks=True,  # Save extracted blocks for debugging
+        save_html=True,  # Will be ignored since output_dir is None
+        save_blocks=True,  # Will be ignored since output_dir is None
     )
 
     print(f"\n=== SCRAPING COMPLETE ===")
@@ -527,8 +611,4 @@ if __name__ == "__main__":
             asyncio.run(main())
     except RuntimeError:
         # No event loop, safe to use asyncio.run
-        asyncio.run(main())
-    except ImportError:
-        # nest_asyncio not available, try alternative approach
-        print("For Jupyter notebooks, install nest_asyncio: pip install nest_asyncio")
         asyncio.run(main())

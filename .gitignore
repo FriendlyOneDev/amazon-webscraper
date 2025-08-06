@@ -210,3 +210,4 @@ products.json
 amazon_data/
 amazon_products.json
 products.db
+debug_output/
