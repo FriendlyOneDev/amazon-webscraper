@@ -1,0 +1,52 @@
+{# static/products.html #}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Amazon Products</title>
+    <style>
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        form { margin-bottom: 1em; }
+    </style>
+</head>
+<body>
+<h1>Amazon Products</h1>
+
+<form method="get">
+    <label>Min Rating: <input type="number" name="min_rating" step="0.1" min="0" max="5"></label>
+    <label>Max Price: <input type="number" name="max_price" step="0.01" min="0"></label>
+    <label>Min Reviews: <input type="number" name="min_reviews" min="0"></label>
+    <button type="submit">Filter</button>
+</form>
+
+<table>
+    <thead>
+    <tr>
+        <th>Title</th>
+        <th>Price</th>
+        <th>Original</th>
+        <th>Rating</th>
+        <th>Reviews</th>
+        <th>Delivery</th>
+        <th>Seller</th>
+        <th>Link</th>
+    </tr>
+    </thead>
+    <tbody>
+    {% for product in products %}
+        <tr>
+            <td>{{ product.title[:60] }}{% if product.title|length > 60 %}...{% endif %}</td>
+            <td>{{ product.current_price }}</td>
+            <td>{{ product.original_price }}</td>
+            <td>{{ product.rating }}</td>
+            <td>{{ product.reviews }}</td>
+            <td>{{ product.delivery }}</td>
+            <td>{{ product.seller }}</td>
+            <td><a href="{{ product.product_url }}" target="_blank">View</a></td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</body>
+</html>

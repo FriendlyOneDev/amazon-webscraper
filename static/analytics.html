@@ -1,0 +1,88 @@
+{# templates/analytics.html #}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Analytics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        table { border-collapse: collapse; width: 100%; margin-bottom: 2em; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .section { margin-bottom: 2em; }
+    </style>
+</head>
+<body>
+<h1>Analytics</h1>
+
+<div class="section">
+    <h2>Average Price (Rating ≥ 4.0):</h2>
+    <p>{{ avg_price if avg_price else 'N/A' }}</p>
+</div>
+
+<div class="section">
+    <h2>Product with Highest Discount:</h2>
+    {% if top_discount %}
+        <p><strong>{{ top_discount.title }}</strong><br>
+        Original: {{ top_discount.original_price }}, Now: {{ top_discount.current_price }}<br>
+        <a href="{{ top_discount.product_url }}" target="_blank">View Product</a></p>
+    {% else %}
+        <p>No data available.</p>
+    {% endif %}
+</div>
+
+<div class="section">
+    <h2>Top 3 Products by Rating/Price:</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>Title</th>
+            <th>Rating</th>
+            <th>Price</th>
+            <th>Ratio</th>
+            <th>Link</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for product in top_value %}
+            <tr>
+                <td>{{ product.title[:60] }}{% if product.title|length > 60 %}...{% endif %}</td>
+                <td>{{ product.rating }}</td>
+                <td>{{ product.current_price }}</td>
+                <td>{{ (product.rating | float / product.current_price) | round(2) }}</td>
+                <td><a href="{{ product.product_url }}" target="_blank">View</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="section">
+    <h2>Price Distribution Chart</h2>
+    <canvas id="priceChart" width="400" height="200"></canvas>
+</div>
+
+<script>
+    const prices = {{ prices | tojson }};
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    const priceChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: prices.map((_, i) => i + 1),
+            datasets: [{
+                label: 'Product Prices',
+                data: prices,
+                borderWidth: 1
+            }]
+        },
+        options: {
+            scales: {
+                y: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+</script>
+
+</body>
+</html>
